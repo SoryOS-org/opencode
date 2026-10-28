@@ -9,6 +9,7 @@ import { projectSettingsKey, useSettings } from "@/settings/model"
 import { useWorkspaceLocation } from "@/workspaces/location"
 import { sessionPermissionRequest, sessionFormRequest, sessionTreeIDs } from "@/session/requests/session-request-tree"
 import { createWebSearchRequest } from "./websearch"
+import { createSessionGoalModel } from "@/session/goal/model"
 import { createSessionBackground } from "@/session/requests/background"
 import { createSteerBackground } from "@/session/requests/steer-background"
 import { useData } from "@/runtime/server/current"
@@ -104,6 +105,13 @@ export function createSessionRequestModel() {
     return data.session.form.list("global", ref)?.find((item) => item.metadata?.kind === "mcp-elicitation")
   })
 
+  const goal = createSessionGoalModel({
+    sessionID: () => params.id,
+    connected: () => serverSDK.connection.status() === "connected",
+    data,
+    api: serverSDK.api,
+  })
+
   const permissionRequest = createMemo((): PermissionRequest | undefined => {
     const id = params.id
 
@@ -195,6 +203,7 @@ export function createSessionRequestModel() {
     blocked,
     questionRequest,
     elicitationRequest,
+    goal,
     websearch,
     permissionRequest,
     permissionResponding,
