@@ -148,6 +148,22 @@ export type InstructionHash = string
 
 export type SessionInboxSyntheticPayload1 = { text: string; description?: string; metadata?: { [x: string]: any } }
 
+export type SessionGoalID = string
+
+export type SessionGoalReason = { code: string; message: string }
+
+export type SessionGoalTodoInput = {
+  content: string
+  status: "pending" | "in_progress" | "completed" | "cancelled"
+  acceptance?: string
+}
+
+export type SessionGoalTodoVerification = {
+  position: number
+  status: "pending" | "in_progress" | "completed" | "cancelled"
+  feedback: string
+}
+
 export type SessionMessageNative1 = { [x: string]: any }
 
 export type ToolFileContent1 = { type: "file"; uri: string; mime: string; name?: string | undefined }
@@ -159,6 +175,14 @@ export type SessionMessageToolStateRunning1 = {
 }
 
 export type SessionInterruptResponse = { interrupted: boolean }
+
+export type SessionGoalTodoItem = {
+  position: number | "Infinity" | "-Infinity" | "NaN"
+  content: string
+  status: "pending" | "in_progress" | "completed" | "cancelled"
+  acceptance?: string
+  feedback?: string
+}
 
 export type FormID = string
 
@@ -571,6 +595,24 @@ export type InstructionEntrySnapshot = Array<{ key: InstructionEntryKey; value: 
 export type EventLogSynced = { type: "log.synced"; aggregateID: string; seq?: EventSeq }
 
 export type LocationRef = { directory: AbsolutePath; workspaceID?: WorkspaceID }
+
+export type SessionGoalSnapshot = {
+  id: SessionGoalID
+  revision: number
+  objective: string
+  phase: "active" | "paused" | "blocked" | "complete"
+  blockedReason?: SessionGoalReason
+  maxGoalRounds: number
+}
+
+export type SessionGoalSnapshot1 = {
+  id: SessionGoalID
+  revision: number | "Infinity" | "-Infinity" | "NaN"
+  objective: string
+  phase: "active" | "paused" | "blocked" | "complete"
+  blockedReason?: SessionGoalReason
+  maxGoalRounds: number | "Infinity" | "-Infinity" | "NaN"
+}
 
 export type SessionMessageAssistantText1 = { type: "text"; text: string; native?: SessionMessageNative1 }
 
@@ -1251,6 +1293,36 @@ export type SessionInstructionsUpdated = {
   data: { sessionID: SessionID; delta: { [x: string]: InstructionHash | "removed" }; text?: string }
 }
 
+export type SessionGoalCleared = {
+  id: EventID
+  created: number
+  metadata?: { [x: string]: any }
+  type: "session.goal.cleared"
+  durable: { aggregateID: string; seq: EventSeq; version: 1 }
+  location?: LocationRef
+  data: { sessionID: SessionID; goalID: SessionGoalID; revision: number }
+}
+
+export type SessionTodoUpdated = {
+  id: EventID
+  created: number
+  metadata?: { [x: string]: any }
+  type: "session.todo.updated"
+  durable: { aggregateID: string; seq: EventSeq; version: 1 }
+  location?: LocationRef
+  data: { sessionID: SessionID; revision: number; todos: Array<SessionGoalTodoInput> }
+}
+
+export type SessionTodoVerified = {
+  id: EventID
+  created: number
+  metadata?: { [x: string]: any }
+  type: "session.todo.verified"
+  durable: { aggregateID: string; seq: EventSeq; version: 1 }
+  location?: LocationRef
+  data: { sessionID: SessionID; revision: number; items: Array<SessionGoalTodoVerification> }
+}
+
 export type SessionSynthetic = {
   id: EventID
   created: number
@@ -1550,7 +1622,7 @@ export type SessionUsageRecorded = {
   type: "session.usage.recorded"
   durable: { aggregateID: string; seq: EventSeq; version: 1 }
   location?: LocationRef
-  data: { sessionID: SessionID; source: "title" | "compaction"; cost: MoneyUSD; tokens: TokenUsageInfo }
+  data: { sessionID: SessionID; source: "title" | "compaction" | "goal-verify"; cost: MoneyUSD; tokens: TokenUsageInfo }
 }
 
 export type LocationShutdown = {
@@ -1990,6 +2062,25 @@ export type McpResourcesChanged = {
   type: "mcp.resources.changed"
   location?: LocationRef
   data: { server: string }
+}
+
+export type SessionGoalUpdated = {
+  id: EventID
+  created: number
+  metadata?: { [x: string]: any }
+  type: "session.goal.updated"
+  durable: { aggregateID: string; seq: EventSeq; version: 1 }
+  location?: LocationRef
+  data: { sessionID: SessionID; snapshot: SessionGoalSnapshot }
+}
+
+export type SessionGoalState = {
+  goal?: SessionGoalSnapshot1
+  createdAt?: number | "Infinity" | "-Infinity" | "NaN"
+  rounds: number | "Infinity" | "-Infinity" | "NaN"
+  maxGoalRounds: number | "Infinity" | "-Infinity" | "NaN"
+  armed: boolean
+  todo: Array<SessionGoalTodoItem>
 }
 
 export type SessionToolSuccess = {
@@ -2650,6 +2741,10 @@ export type SessionEventDurable =
   | SessionExecutionFailed
   | SessionExecutionInterrupted
   | SessionInstructionsUpdated
+  | SessionGoalUpdated
+  | SessionGoalCleared
+  | SessionTodoUpdated
+  | SessionTodoVerified
   | SessionSynthetic
   | SessionSkillActivated
   | SessionShellStarted
@@ -2716,6 +2811,10 @@ export type V2Event =
   | SessionExecutionFailed
   | SessionExecutionInterrupted
   | SessionInstructionsUpdated
+  | SessionGoalUpdated
+  | SessionGoalCleared
+  | SessionTodoUpdated
+  | SessionTodoVerified
   | SessionSynthetic
   | SessionSkillActivated
   | SessionShellStarted
@@ -3454,6 +3553,33 @@ export type SessionBackgroundInput = { readonly sessionID: string }
 
 export type SessionBackgroundOutput = void
 
+export type SessionGoalGetInput = { readonly sessionID: string }
+
+export type SessionGoalGetOutput = { data: SessionGoalState }["data"]
+
+export type SessionGoalUpdateInput = {
+  readonly sessionID: string
+  readonly action: "set" | "clear" | "edit" | "pause" | "resume"
+  readonly objective?: string | undefined
+  readonly expectedRevision?: number | undefined
+  readonly expectedGoalID?: string | undefined
+}
+
+export type SessionGoalUpdateOutput = { data: SessionGoalSnapshot1 }["data"]
+
+export type SessionTodoReplaceInput = {
+  readonly sessionID: string
+  readonly todos: ReadonlyArray<{
+    readonly content: string
+    readonly status: "pending" | "in_progress" | "completed" | "cancelled"
+    readonly acceptance?: string
+  }>
+  readonly expectedRevision?: number | "Infinity" | "-Infinity" | "NaN" | null | undefined
+  readonly expectedGoalID?: string | null | undefined
+}
+
+export type SessionTodoReplaceOutput = void
+
 export type SessionMessageGetInput = { readonly sessionID: string; readonly messageID: string }
 
 export type SessionMessageGetOutput = { data: SessionMessageInfo }["data"]
@@ -4177,6 +4303,10 @@ export type EventSubscribeInput = {
         | "session.execution.failed"
         | "session.execution.interrupted"
         | "session.instructions.updated"
+        | "session.goal.updated"
+        | "session.goal.cleared"
+        | "session.todo.updated"
+        | "session.todo.verified"
         | "session.synthetic"
         | "session.skill.activated"
         | "session.shell.started"
