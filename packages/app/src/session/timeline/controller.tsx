@@ -178,7 +178,7 @@ export function createTimelineController(input: { session: TimelineSessionSource
         ? "full"
         : "compact"
 
-  const shellToolPartsExpanded = () => timelineDetail().shell.details === "expanded"
+  const shellToolPartsExpanded = () => timelineDetail().shell.details !== "collapsed"
   const editToolPartsExpanded = () => timelineDetail().edit.details === "expanded"
 
   const projection = createTimelineProjection({
