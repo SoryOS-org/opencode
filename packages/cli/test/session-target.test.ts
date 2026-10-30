@@ -135,4 +135,33 @@ describe("session target resolver", () => {
     spyOn(client.session, "create").mockRejectedValue(new Error("connection closed after create"))
     await expect(resolveSessionTarget({ client, prepare })).rejects.toBeInstanceOf(SessionTargetMutationError)
   })
+
+  test("creates a fresh Session in a new worktree of the requested project", async () => {
+    const client = OpenCode.make({ baseUrl: "https://opencode.test" })
+    spyOn(client.location, "get").mockImplementation(async (input) =>
+      location(input?.location?.directory === "/worktrees/pr-12" ? "/worktrees/pr-12" : "/project"),
+    )
+    const worktree = spyOn(client.worktree, "create").mockResolvedValue({ directory: "/worktrees/pr-12" })
+    const create = spyOn(client.session, "create").mockResolvedValue(session("ses_fresh", "/worktrees/pr-12"))
+
+    const target = await resolveSessionTarget({
+      client,
+      location: { directory: "/project" },
+      worktree: "pr-12",
+      prepare,
+    })
+    expect(worktree).toHaveBeenCalledWith({ projectID: "project", name: "pr-12" })
+    expect(create).toHaveBeenCalledWith(expect.objectContaining({ location: { directory: "/worktrees/pr-12" } }))
+    expect(target.location.directory).toBe("/worktrees/pr-12")
+  })
+
+  test("lets the server name an unnamed worktree", async () => {
+    const client = OpenCode.make({ baseUrl: "https://opencode.test" })
+    spyOn(client.location, "get").mockResolvedValue(location("/project"))
+    const worktree = spyOn(client.worktree, "create").mockResolvedValue({ directory: "/worktrees/brave-otter" })
+    spyOn(client.session, "create").mockResolvedValue(session("ses_fresh", "/worktrees/brave-otter"))
+
+    await resolveSessionTarget({ client, location: { directory: "/project" }, worktree: true, prepare })
+    expect(worktree).toHaveBeenCalledWith({ projectID: "project", name: undefined })
+  })
 })
