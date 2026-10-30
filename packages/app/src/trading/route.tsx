@@ -20,6 +20,7 @@ import { Persist, persisted } from "@/runtime/persistence/storage"
 import { Icon } from "@opencode/ui/icon"
 import { IconButton } from "@opencode/ui/icon-button"
 import { Button } from "@opencode/ui/button"
+import { TextInput } from "@opencode/ui/text-input"
 import { Textarea } from "@opencode/ui/textarea"
 import { Dialog, DialogBody, DialogFooter, DialogHeader, DialogTitleGroup } from "@opencode/ui/dialog"
 import { useDialog } from "@opencode/ui/context/dialog"
@@ -39,30 +40,42 @@ const TargetSessionRouteContent = lazy(() =>
 import { isTradingSession, scanTradingSessions, TRADING_DESK_CONTEXT, TRADING_METADATA_MARK } from "./session"
 import "./trading.css"
 import type { SessionInfo } from "@opencode/client/promise"
-import { DEMO, REFRESCO_MS, arrancarSistema, cancelarTarea, cerrarPosicion, cerrarTotal, pararSistema, pedirSnapshot, type BotInfo, type RegistroInfo, type SnapshotMotor, type TareaInfo } from "./motor"
+import { DEMO, REFRESCO_MS, arrancarSistema, cerrarPosicion, cerrarTotal, conectarCuenta, desconectarCuenta, panicoTotal, pararSistema, pedirSnapshot, programarTarea, type BotInfo, type CurvaInfo, type RegistroInfo, type SnapshotMotor, type TradeInfo } from "./motor"
 
 // Same currency rendering as the TUI's trading panel: `$12.50` / `-$81.11`.
 const usd = new Intl.NumberFormat("en-US", { style: "currency", currency: "USD", currencyDisplay: "narrowSymbol" })
 
 const reloj = new Intl.DateTimeFormat(undefined, { hour: "2-digit", minute: "2-digit", second: "2-digit", hour12: false })
 
-const formatoUSD = (número: number | null) => (número === null ? "—" : usd.format(número))
+const formatoUSD = (número: number | null) => (número === null || !Number.isFinite(número) ? "—" : usd.format(número))
 
 /** `-0.16%`-style signed percentage, or a dash when the engine received no value. */
-const formatoPct = (valor: number | null) => (valor === null ? "—" : `${Number(valor.toFixed(2))}%`)
+const formatoPct = (valor: number | null) => (valor === null || !Number.isFinite(valor) ? "—" : `${Number(valor.toFixed(2))}%`)
 
-const formatoHora = (ts: number) => reloj.format(ts)
+const formatoHora = (ts: number) => (!Number.isFinite(ts) ? "—" : reloj.format(ts))
 
-/** A task's due time: the weekday abbreviates to keep the row readable in the narrow card. */
-const formatoFechaHora = new Intl.DateTimeFormat(undefined, {
-  weekday: "short",
-  day: "numeric",
-  hour: "2-digit",
-  minute: "2-digit",
-  hour12: false,
-})
+/** Record rows: today's entries read as plain clock time, older ones name their day — the
+ * ring keeps several days of history, so a bare clock time would make yesterday read as
+ * today. The dossier's tooltip always carries the full stamp. */
+const formatoDíaHora = new Intl.DateTimeFormat(undefined, { day: "2-digit", month: "2-digit", hour: "2-digit", minute: "2-digit", hour12: false })
 
-const formatoTarea = (ts: number) => formatoFechaHora.format(new Date(ts))
+const formatoCompleto = new Intl.DateTimeFormat(undefined, { dateStyle: "medium", timeStyle: "medium" })
+
+function esHoy(momento: Date) {
+  const ahora = new Date()
+  return ahora.getFullYear() === momento.getFullYear() && ahora.getMonth() === momento.getMonth() && ahora.getDate() === momento.getDate()
+}
+
+function formatoMomento(ts: number) {
+  if (!Number.isFinite(ts)) return "—"
+
+  const momento = new Date(ts)
+  return esHoy(momento) ? reloj.format(momento) : formatoDíaHora.format(momento)
+}
+
+function títuloMomento(ts: number) {
+  return Number.isFinite(ts) ? formatoCompleto.format(new Date(ts)) : undefined
+}
 
 const LINEA = { "line-height": "var(--line-height-compact)" } as const
 
@@ -116,25 +129,6 @@ const CLAVE_EVENTO: Record<Exclude<RegistroInfo["evento"], null>, string> = {
   apertura: "trading.log.event.open",
   cierre: "trading.log.event.close",
   senal: "trading.log.event.signal",
-}
-
-/** A scheduled task's lifetime color: amber while it waits, green when it ran, red when it
- * was skipped (the app was closed at its due time) and gray once the user withdrew it. */
-function puntoTarea(estado: TareaInfo["estado"]) {
-  if (estado === "pendiente") return "bg-v2-state-fg-warning"
-
-  if (estado === "ejecutada") return "bg-v2-state-fg-success"
-
-  if (estado === "no_ejecutada") return "bg-v2-state-fg-danger"
-
-  return "bg-v2-border-border-muted"
-}
-
-const ETIQUETA_TAREA: Record<TareaInfo["estado"], string> = {
-  pendiente: "trading.task.pending",
-  ejecutada: "trading.task.ran",
-  no_ejecutada: "trading.task.missed",
-  cancelada: "trading.task.cancelled",
 }
 
 function Tarjeta(props: { título: string; acción?: JSX.Element; children: JSX.Element }) {
@@ -463,12 +457,10 @@ function TradingShell(props: {
   const [snapshot, setSnapshot] = createStore<SnapshotMotor>(structuredClone(DEMO))
   const activos = () => snapshot.bots.filter((bot) => bot.activo).length
 
-  // The log is the systems' bible, so a chip per talking system plus "all" keeps the flow
-  // readable; null shows everything.
-  const [botEnVista, fijarBotEnVista] = createSignal<string | null>(null)
-  const botsDelRegistro = () => [...new Set(snapshot.registros.map((registro) => registro.bot))]
-  const registrosVistos = () =>
-    botEnVista() === null ? snapshot.registros : snapshot.registros.filter((registro) => registro.bot === botEnVista())
+  // One record, no per-system tabs: log lines and closed trades merge into a single
+  // chronological list whose close rows ARE the trades (each close already logs itself,
+  // so the trades carry the P/L and the log's own close rows drop out) — nothing repeats.
+  const registroUnido = () => reunirRegistro(snapshot.registros, snapshot.trades)
 
   // The manual-close permission read strictly: the switch is an opt-in, so until the
   // user turns it on (stored server-global; fresh installs read the off default) every
@@ -511,15 +503,13 @@ function TradingShell(props: {
     dialog.show(() => (
       <DialogFicha
         bot={() => snapshot.bots.find((candidato) => candidato.id === bot.id)}
-        registros={() => snapshot.registros.filter((registro) => registro.bot === bot.nombre)}
+        registros={() => registroUnido().filter((entrada) => entrada.bot === bot.nombre)}
+        programar={(entrada) => programarSistema(bot.id, entrada)}
       />
     ))
   }
 
   const chatWidthMax = () => Math.max(CHAT_WIDTH_MIN, window.innerWidth - DASHBOARD_WIDTH_MIN - 24)
-
-  // Task rows name the systems they act on; an unknown id (a renamed system) falls back to itself.
-  const nombreSistema = (id: string) => snapshot.bots.find((bot) => bot.id === id)?.nombre ?? id
 
   const refrescar = async () => {
     const real = await pedirSnapshot(sdk.api)
@@ -541,11 +531,51 @@ function TradingShell(props: {
     void operacion.then(() => void refrescar())
   }
 
-  // Withdrawing a pending task is a direct UI action (like the systems' own flags), so no
-  // confirmation dialog: the task has not fired, and an immediate refresh shows the flip.
-  const retirarTarea = (taskID: string) => {
-    void cancelarTarea(sdk.api, taskID).then(() => void refrescar())
+  // Batch toggles write every system's flag in one go and refresh once — the engine takes
+  // the writes in parallel, so the pool costs one refresh instead of one per system.
+  const lotearSistemas = async (operaciones: Array<Promise<unknown>>) => {
+    await Promise.allSettled(operaciones)
+    await refrescar()
   }
+
+  const arrancarTodos = () =>
+    lotearSistemas(snapshot.bots.filter((bot) => !bot.activo).map((bot) => arrancarSistema(sdk.api, bot.id)))
+
+  const pararTodos = () =>
+    lotearSistemas(snapshot.bots.filter((bot) => bot.activo).map((bot) => pararSistema(sdk.api, bot.id)))
+
+  // Scheduling from a system's dossier: the scope is fixed by the card itself, so only the
+  // action and the moment are picked. The same toast feedback as the dashboard writes.
+  const programarSistema = async (systemID: string, entrada: { kind: "start-systems" | "stop-systems"; delayMinutes?: number; atTime?: string }) => {
+    const resultado = await programarTarea(sdk.api, {
+      kind: entrada.kind,
+      systemIDs: [systemID],
+      delayMinutes: entrada.delayMinutes,
+      atTime: entrada.atTime,
+    })
+
+    if (resultado === undefined) {
+      showToast({ variant: "error", title: language.t("trading.tasks.failed") })
+    } else {
+      showToast({ variant: "success", icon: "circle-check", title: language.t("trading.tasks.saved") })
+    }
+
+    await refrescar()
+  }
+
+  // Stopping everything leaves open positions alone — they are not auto-closed — so the
+  // dialog states that plainly before the flags flip.
+  const abrirPararTodos = () =>
+    dialog.show(() => (
+      <DialogCierre
+        avisa={false}
+        confirmar={pararTodos}
+        título={language.t("trading.systems.stopAll.title")}
+        cuerpo={language.t("trading.systems.stopAll.body")}
+        advertencia=""
+        confirmarTexto={language.t("trading.systems.stopAll")}
+      />
+    ))
 
   // Close semantics: real orders, so the confirmation is a dialog that states the full cycle
   // and warns when a running system trades the same contract family (it would reopen the
@@ -644,6 +674,57 @@ function TradingShell(props: {
     ))
   }
 
+  // Conectar/Desconectar are the user's own clicks: the engine never links TWS by itself,
+  // and each toggle refreshes right away so the pill and the account follow the socket.
+  const [enlazando, fijarEnlazando] = createSignal(false)
+  const enlazar = async () => {
+    if (enlazando()) return
+    fijarEnlazando(true)
+    await conectarCuenta(sdk.api)
+    fijarEnlazando(false)
+    await refrescar()
+  }
+
+  const desenlazar = async () => {
+    if (enlazando()) return
+    fijarEnlazando(true)
+    await desconectarCuenta(sdk.api)
+    fijarEnlazando(false)
+    await refrescar()
+  }
+
+  // The panic stop's verdict arrives as one message (the stopped systems plus the close-all
+  // report), shown in the toast the same way the close actions report theirs.
+  const ejecutarPanico = async () => {
+    const resultado = await panicoTotal(sdk.api)
+
+    if (resultado === undefined) {
+      showToast({ variant: "error", title: language.t("trading.panic.failed") })
+    } else {
+      showToast({
+        variant: resultado.close.ok ? "success" : "error",
+        icon: resultado.close.ok ? "circle-check" : undefined,
+        title: language.t("trading.panic.sent"),
+        description: resultado.message,
+      })
+    }
+
+    await refrescar()
+  }
+
+  const abrirPanico = () => {
+    dialog.show(() => (
+      <DialogCierre
+        avisa={false}
+        confirmar={ejecutarPanico}
+        título={language.t("trading.panic.title")}
+        cuerpo={language.t("trading.panic.body")}
+        advertencia=""
+        confirmarTexto={language.t("trading.panic.confirm")}
+      />
+    ))
+  }
+
   onMount(() => {
     void refrescar()
 
@@ -660,6 +741,21 @@ function TradingShell(props: {
     )
 
   const puntoMotor = () => (snapshot.enlace ? "bg-v2-state-fg-success" : "bg-v2-state-fg-danger")
+
+  // The day-loss guard read passively: its state is one account line, never an input here —
+  // the limit itself is set through the chat.
+  const guardiaDia = () => {
+    const riesgo = snapshot.riesgo
+
+    if (!riesgo) return { texto: "—", tono: "text-v2-text-text-faint" }
+
+    if (riesgo.disparada !== null)
+      return { texto: `${language.t("trading.risk.triggered")} · ${formatoHora(riesgo.disparada)}`, tono: "text-v2-state-fg-danger" }
+
+    if (riesgo.limite_dia === 0) return { texto: language.t("trading.risk.off"), tono: "text-v2-text-text-faint" }
+
+    return { texto: language.t("trading.risk.armed"), tono: "text-v2-state-fg-success" }
+  }
 
   return (
     <div class="relative flex-1 min-h-0 flex flex-col md:flex-row" data-slot="trading-panes">
@@ -684,6 +780,28 @@ function TradingShell(props: {
           <h1 class="min-w-0 flex-1 text-[15px] text-v2-text-text-base font-medium" style={{ "line-height": "var(--line-height-base)" }}>
             {language.t("trading.title")}
           </h1>
+          <Show when={!snapshot.demo}>
+            <Button
+              type="button"
+              variant="danger"
+              size="small"
+              disabled={!snapshot.enlace}
+              onClick={abrirPanico}
+              aria-label={language.t("trading.panic")}
+            >
+              {language.t("trading.panic")}
+            </Button>
+            <Button
+              type="button"
+              variant="ghost-muted"
+              size="small"
+              disabled={enlazando()}
+              onClick={() => void (snapshot.enlace ? desenlazar() : enlazar())}
+              aria-label={language.t(snapshot.enlace ? "trading.engine.disconnect.aria" : "trading.engine.connect.aria")}
+            >
+              {language.t(snapshot.enlace ? "trading.engine.disconnect" : "trading.engine.connect")}
+            </Button>
+          </Show>
           <span
             class="flex h-7 shrink-0 items-center gap-1.5 rounded-[12px] border-[0.5px] border-v2-border-border-muted bg-v2-background-bg-layer-01 ps-2.5 pe-2.5 text-[13px] font-[440] leading-text-compact tracking-[-0.04px] text-v2-text-text-base shadow-[var(--v2-elevation-raised)]"
             style={LINEA}
@@ -697,23 +815,59 @@ function TradingShell(props: {
           <div class="flex w-full flex-col gap-3">
             <div class="grid gap-3 md:grid-cols-[auto_minmax(0,1fr)]">
               <Tarjeta título={language.t("trading.account")}>
-                <dl>
-                  <MetaCuenta etiqueta={language.t("trading.account.id")} mono>
-                    {snapshot.cuenta.id || "—"}
-                  </MetaCuenta>
-                  <MetaCuenta etiqueta={language.t("trading.account.type")}>{snapshot.cuenta.tipo || "—"}</MetaCuenta>
-                  <MetaCuenta etiqueta={language.t("trading.account.netWorth")}>{formatoUSD(snapshot.cuenta.patrimonio)}</MetaCuenta>
-                  <MetaCuenta etiqueta={language.t("trading.account.cash")}>{formatoUSD(snapshot.cuenta.efectivo)}</MetaCuenta>
-                  <MetaCuenta etiqueta={language.t("trading.account.pnlToday")} tono={tonoPnl(snapshot.cuenta.pnl_dia)}>
-                    {formatoUSD(snapshot.cuenta.pnl_dia)}
-                  </MetaCuenta>
-                  <MetaCuenta etiqueta={language.t("trading.account.pnlRealized")} tono={tonoPnl(snapshot.cuenta.pnl_realizado)}>
-                    {formatoUSD(snapshot.cuenta.pnl_realizado)}
-                  </MetaCuenta>
-                </dl>
+                <Show when={snapshot.enlace} fallback={<p class="px-1 text-[13px] text-v2-text-text-faint" style={LINEA}>{language.t("trading.account.offline")}</p>}>
+                  <dl>
+                    <MetaCuenta etiqueta={language.t("trading.account.id")} mono>
+                      {snapshot.cuenta.id || "—"}
+                    </MetaCuenta>
+                    <MetaCuenta etiqueta={language.t("trading.account.type")}>{snapshot.cuenta.tipo || "—"}</MetaCuenta>
+                    <MetaCuenta etiqueta={language.t("trading.account.netWorth")}>{formatoUSD(snapshot.cuenta.patrimonio)}</MetaCuenta>
+                    <MetaCuenta etiqueta={language.t("trading.account.cash")}>{formatoUSD(snapshot.cuenta.efectivo)}</MetaCuenta>
+                    <MetaCuenta etiqueta={language.t("trading.account.pnlToday")} tono={tonoPnl(snapshot.cuenta.pnl_dia)}>
+                      {formatoUSD(snapshot.cuenta.pnl_dia)}
+                    </MetaCuenta>
+                    <MetaCuenta etiqueta={language.t("trading.account.pnlRealized")} tono={tonoPnl(snapshot.cuenta.pnl_realizado)}>
+                      {formatoUSD(snapshot.cuenta.pnl_realizado)}
+                    </MetaCuenta>
+                  </dl>
+                  <MiniCurva curva={snapshot.curva} />
+                </Show>
+                <MetaCuenta etiqueta={language.t("trading.risk.limit")} tono={guardiaDia().tono}>
+                  {guardiaDia().texto}
+                </MetaCuenta>
               </Tarjeta>
 
-              <Tarjeta título={language.t("trading.bots")}>
+              <Tarjeta
+                título={language.t("trading.bots")}
+                acción={
+                  <div class="flex items-center gap-1">
+                    <Tooltip class="shrink-0" placement="bottom" value={language.t("trading.systems.startAll")}>
+                      <IconButton
+                        type="button"
+                        variant="ghost-muted"
+                        size="small"
+                        disabled={activos() >= snapshot.bots.length}
+                        onMouseDown={(event) => event.preventDefault()}
+                        onClick={arrancarTodos}
+                        aria-label={language.t("trading.systems.startAll")}
+                        icon={<Icon name="play" />}
+                      />
+                    </Tooltip>
+                    <Tooltip class="shrink-0" placement="bottom" value={language.t("trading.systems.stopAll")}>
+                      <IconButton
+                        type="button"
+                        variant="ghost-muted"
+                        size="small"
+                        disabled={activos() === 0}
+                        onMouseDown={(event) => event.preventDefault()}
+                        onClick={abrirPararTodos}
+                        aria-label={language.t("trading.systems.stopAll")}
+                        icon={<Icon name="stop" />}
+                      />
+                    </Tooltip>
+                  </div>
+                }
+              >
                 <div class="mb-2 px-1 text-[13px] text-v2-text-text-muted" style={LINEA}>
                   {language.plural("trading.bots.active", activos(), { total: snapshot.bots.length })}
                 </div>
@@ -830,119 +984,15 @@ function TradingShell(props: {
                 </Show>
               </Tarjeta>
 
-              <Tarjeta título={language.t("trading.log")}>
-                <Show when={snapshot.registros.length > 0} fallback={<p class="px-1 text-[13px] text-v2-text-text-faint">{language.t("trading.log.empty")}</p>}>
-                  <Show when={botsDelRegistro().length > 1}>
-                    <div class="mb-1.5 flex flex-wrap gap-1">
-                      <button
-                        type="button"
-                        class={`h-5 shrink-0 rounded-full border px-2 text-[11px] leading-[18px] text-v2-text-text-base ${
-                          botEnVista() === null
-                            ? "border-v2-border-border-muted bg-v2-background-bg-layer-02"
-                            : "border-transparent hover:text-v2-text-text-muted text-v2-text-text-faint"
-                        }`}
-                        onClick={() => fijarBotEnVista(null)}
-                        aria-pressed={botEnVista() === null}
-                      >
-                        {language.t("trading.log.all")}
-                      </button>
-                      <For each={botsDelRegistro()}>
-                        {(bot) => (
-                          <button
-                            type="button"
-                            class={`h-5 max-w-[220px] shrink-0 truncate rounded-full border px-2 text-[11px] font-mono leading-[18px] text-v2-text-text-base ${
-                              botEnVista() === bot
-                                ? "border-v2-border-border-muted bg-v2-background-bg-layer-02"
-                                : "border-transparent hover:text-v2-text-text-muted text-v2-text-text-faint"
-                            }`}
-                            onClick={() => fijarBotEnVista(bot)}
-                            aria-pressed={botEnVista() === bot}
-                          >
-                            {bot}
-                          </button>
-                        )}
-                      </For>
-                    </div>
-                  </Show>
-                  <div class="flex flex-col">
-                    <For each={registrosVistos()}>
-                      {(registro) => (
-                        <div class="flex min-h-6 items-start gap-2">
-                          <time class="w-16 shrink-0 text-[11px] text-v2-text-text-faint tabular-nums" style={LINEA}>
-                            {formatoHora(registro.ts)}
-                          </time>
-                          <span class={`w-10 shrink-0 text-[11px] ${tonoNivel(registro.nivel)}`} style={LINEA}>
-                            {registro.nivel}
-                          </span>
-                          <span class="min-w-0 flex-1 text-[13px] break-words whitespace-pre-wrap text-v2-text-text-muted">
-                            <Show when={registro.evento} keyed>
-                              {(evento) => (
-                                <span class={`me-1 inline-block rounded-full border px-1.5 text-[10px] font-medium tracking-[0.04em] uppercase leading-[14px] ${CLASE_EVENTO[evento]}`}>
-                                  {language.t(CLAVE_EVENTO[evento])}
-                                </span>
-                              )}
-                            </Show>
-                            <span class="font-mono">{registro.bot}</span> {registro.mensaje}
-                          </span>
-                        </div>
-                      )}
-                    </For>
-                  </div>
+              <Tarjeta
+                título={language.t("trading.log")}
+                acción={<MenuDescarga entradas={registroUnido} />}
+              >
+                <Show when={registroUnido().length > 0} fallback={<p class="px-1 text-[13px] text-v2-text-text-faint">{language.t("trading.log.empty")}</p>}>
+                  <ListaRegistro registros={registroUnido()} />
                 </Show>
               </Tarjeta>
             </div>
-
-            <Tarjeta título={language.t("trading.tasks")}>
-              <Show when={snapshot.tareas.length > 0} fallback={<p class="px-1 text-[13px] text-v2-text-text-faint" style={LINEA}>{language.t("trading.tasks.empty")}</p>}>
-                <ul class="flex flex-col">
-                  <For each={snapshot.tareas}>
-                    {(tarea) => (
-                      <li class="flex min-h-6 items-center gap-2">
-                        <span class={`size-1.5 shrink-0 rounded-full ${puntoTarea(tarea.estado)}`} aria-hidden="true" />
-                        <span class="shrink-0 text-[13px] text-v2-text-text-base" style={LINEA}>
-                          {language.t(tarea.accion === "arrancar" ? "trading.task.start" : "trading.task.stop")}
-                        </span>
-                        <Show
-                          when={tarea.sistemas.length > 0}
-                          fallback={
-                            <span class="min-w-0 flex-1 truncate text-[11px] text-v2-text-text-faint" style={LINEA}>
-                              {language.t("trading.tasks.all")}
-                            </span>
-                          }
-                        >
-                          <span class="min-w-0 flex-1 truncate text-[11px] text-v2-text-text-faint" style={LINEA}>
-                            {tarea.sistemas.map(nombreSistema).join(", ")}
-                          </span>
-                        </Show>
-                        <span class="shrink-0 text-[11px] text-v2-text-text-muted tabular-nums" style={LINEA}>
-                          {formatoTarea(tarea.hora)}
-                        </span>
-                        <span class="shrink-0 text-[11px] text-v2-text-text-faint" style={LINEA}>
-                          {language.t(ETIQUETA_TAREA[tarea.estado])}
-                        </span>
-                        <Show when={tarea.estado === "pendiente"}>
-                          <Tooltip
-                            class="shrink-0"
-                            placement="bottom"
-                            value={language.t("trading.task.cancel")}
-                          >
-                            <IconButton
-                              type="button"
-                              variant="ghost-muted"
-                              size="small"
-                              onMouseDown={(event) => event.preventDefault()}
-                              onClick={() => retirarTarea(tarea.id)}
-                              aria-label={language.t("trading.task.cancel")}
-                              icon={<Icon name="close" />}
-                            />
-                          </Tooltip>
-                        </Show>
-                      </li>
-                    )}
-                  </For>
-                </ul>
-              </Show>
-            </Tarjeta>
           </div>
         </div>
       </div>
@@ -1071,9 +1121,13 @@ function DialogCierre(props: {
 
 /**
  * The system's dossier: its live engine flags and the tail of its own record, the same rows
- * the LOG card draws filtered to this one system, live-updating with the dashboard's 3 s poll.
+ * the record card draws filtered to this one system, live-updating with the dashboard's 3s poll.
  */
-function DialogFicha(props: { bot: Accessor<BotInfo | undefined>; registros: Accessor<RegistroInfo[]> }) {
+function DialogFicha(props: {
+  bot: Accessor<BotInfo | undefined>
+  registros: Accessor<EntradaRegistro[]>
+  programar: (entrada: { kind: "start-systems" | "stop-systems"; delayMinutes?: number; atTime?: string }) => Promise<unknown>
+}) {
   const language = useLanguage()
   const dialog = useDialog()
 
@@ -1130,33 +1184,11 @@ function DialogFicha(props: { bot: Accessor<BotInfo | undefined>; registros: Acc
                     when={props.registros().length > 0}
                     fallback={<p class="px-1 text-[13px] text-v2-text-text-faint" style={LINEA}>{language.t("trading.ficha.record.empty")}</p>}
                   >
-                    <div class="flex flex-col">
-                      <For each={props.registros()}>
-                        {(registro) => (
-                          <div class="flex min-h-6 items-start gap-2">
-                            <time class="w-16 shrink-0 text-[11px] text-v2-text-text-faint tabular-nums" style={LINEA}>
-                              {formatoHora(registro.ts)}
-                            </time>
-                            <span class={`w-10 shrink-0 text-[11px] ${tonoNivel(registro.nivel)}`} style={LINEA}>
-                              {registro.nivel}
-                            </span>
-                            <span class="min-w-0 flex-1 text-[13px] break-words whitespace-pre-wrap text-v2-text-text-muted">
-                              <Show when={registro.evento} keyed>
-                                {(evento) => (
-                                  <span class={`me-1 inline-block rounded-full border px-1.5 text-[10px] font-medium tracking-[0.04em] uppercase leading-[14px] ${CLASE_EVENTO[evento]}`}>
-                                    {language.t(CLAVE_EVENTO[evento])}
-                                  </span>
-                                )}
-                              </Show>
-                              <span class="font-mono">{registro.bot}</span> {registro.mensaje}
-                            </span>
-                          </div>
-                        )}
-                      </For>
-                    </div>
+                    <ListaRegistro registros={props.registros()} />
                   </Show>
                 </div>
               </section>
+              <ProgramaTarea programar={props.programar} />
       </DialogBody>
       <DialogFooter>
         <Button type="button" variant="neutral" onClick={() => dialog.close()}>
@@ -1164,6 +1196,83 @@ function DialogFicha(props: { bot: Accessor<BotInfo | undefined>; registros: Acc
         </Button>
       </DialogFooter>
     </Dialog>
+  )
+}
+
+// The styled native selects the scheduling row uses: no Select primitive exists in the app,
+// and a native one keeps keyboard and accessibility behavior for free.
+const SELECT = "h-7 shrink-0 rounded-[8px] border border-v2-border-border-muted bg-v2-background-bg-layer-01 px-2 text-[13px] text-v2-text-text-base leading-[16px] outline-none"
+
+/**
+ * The dossier's scheduling row: one system's fixed scope, so only the action (start or stop)
+ * and the moment are picked — whole minutes from now or the next HH:MM on the PC's clock.
+ * Validation mirrors the engine's; an invalid value keeps Program disabled instead of
+ * reaching the engine and vanishing there.
+ */
+function ProgramaTarea(props: {
+  programar: (entrada: { kind: "start-systems" | "stop-systems"; delayMinutes?: number; atTime?: string }) => Promise<unknown>
+}) {
+  const language = useLanguage()
+  const [enviando, fijarEnviando] = createSignal(false)
+  const [formulario, fijarFormulario] = createStore({
+    accion: "arrancar" as "arrancar" | "parar",
+    modo: "minutos" as "minutos" | "hora",
+    valor: "30",
+  })
+
+  const válido = () => {
+    const texto = formulario.valor.trim()
+
+    if (formulario.modo === "minutos") return /^\d+$/.test(texto) && Number(texto) >= 1
+
+    return /^([01]?\d|2[0-3]):[0-5]\d$/.test(texto)
+  }
+
+  const enviar = async () => {
+    if (enviando()) return
+
+    fijarEnviando(true)
+    await props.programar({
+      kind: formulario.accion === "arrancar" ? "start-systems" : "stop-systems",
+      delayMinutes: formulario.modo === "minutos" ? Number(formulario.valor.trim()) : undefined,
+      atTime: formulario.modo === "hora" ? formulario.valor.trim() : undefined,
+    })
+    fijarEnviando(false)
+  }
+
+  return (
+    <div class="flex flex-wrap items-center gap-2 border-t border-v2-border-border-muted px-1 py-2">
+      <select
+        class={SELECT}
+        aria-label={language.t("trading.tasks.new.action")}
+        value={formulario.accion}
+        onChange={(event) => fijarFormulario("accion", event.currentTarget.value as typeof formulario.accion)}
+      >
+        <option value="arrancar">{language.t("trading.task.start")}</option>
+        <option value="parar">{language.t("trading.task.stop")}</option>
+      </select>
+      <select
+        class={SELECT}
+        aria-label={language.t("trading.tasks.new.when")}
+        value={formulario.modo}
+        onChange={(event) => fijarFormulario("modo", event.currentTarget.value as typeof formulario.modo)}
+      >
+        <option value="minutos">{language.t("trading.tasks.new.mode.minutes")}</option>
+        <option value="hora">{language.t("trading.tasks.new.mode.time")}</option>
+      </select>
+      <TextInput
+        class="w-24"
+        appearance="small"
+        value={formulario.valor}
+        numeric={formulario.modo === "minutos"}
+        aria-label={language.t("trading.tasks.new.value")}
+        placeholder={formulario.modo === "minutos" ? "30" : "10:30"}
+        onInput={(event) => fijarFormulario("valor", event.currentTarget.value)}
+      />
+      <Button type="button" variant="outline" size="small" disabled={enviando() || !válido()} onClick={() => void enviar()}>
+        {language.t("trading.tasks.new.program")}
+      </Button>
+    </div>
   )
 }
 
@@ -1217,3 +1326,302 @@ function DialogPrompto(props: { contenido: string; guardar: (valor: string) => P
     </Dialog>
   )
 }
+
+/** One unified record row: a log line, or a closed trade carrying the gross P/L the trade
+ * record kept. Log rows and trades share this shape so the record card and each system's
+ * dossier render one list without per-source special cases. */
+interface EntradaRegistro {
+  readonly ts: number
+  readonly nivel: RegistroInfo["nivel"]
+  readonly bot: string
+  readonly mensaje: string
+  readonly evento: RegistroInfo["evento"]
+  /** Gross USD for close rows; null elsewhere. */
+  readonly pnl: number | null
+}
+
+/** Merges the log ring and the trade record into one chronological list. Every close is
+ * already a log line (`event: "close"`), so the trades replace those rows — carrying the
+ * P/L the log lacks — and the log's own close rows drop out, keeping no duplicates. */
+function reunirRegistro(registros: RegistroInfo[], trades: TradeInfo[]): EntradaRegistro[] {
+  const lineas: EntradaRegistro[] = registros
+    .filter((registro) => registro.evento !== "cierre")
+    .map((registro) => ({ ts: registro.ts, nivel: registro.nivel, bot: registro.bot, mensaje: registro.mensaje, evento: registro.evento, pnl: null }))
+  const cierres: EntradaRegistro[] = trades.map((trade) => ({
+    ts: trade.hora,
+    nivel: "info",
+    bot: trade.bot,
+    mensaje: trade.mensaje,
+    evento: "cierre",
+    pnl: trade.pnl,
+  }))
+  return [...lineas, ...cierres].sort((a, b) => a.ts - b.ts)
+}
+
+/** Downloads the picked window's entries as a CSV file, with the BOM so Excel opens the
+ * accented messages right. The anchor-click pattern works in both the renderer and the web. */
+function descargarRegistro(entradas: EntradaRegistro[], etiqueta: string) {
+  const celda = (valor: string) => `"${valor.replaceAll('"', '""').replaceAll("\n", " ")}"`
+  const filas = [
+    "hora,nivel,sistema,evento,mensaje,pnl_usd",
+    ...entradas.map((entrada) =>
+      [
+        new Date(entrada.ts).toISOString(),
+        entrada.nivel,
+        entrada.bot,
+        entrada.evento ?? "",
+        entrada.mensaje,
+        entrada.pnl === null ? "" : entrada.pnl.toFixed(2),
+      ]
+        .map(celda)
+        .join(","),
+    ),
+  ].join("\n")
+  const enlace = document.createElement("a")
+  enlace.href = URL.createObjectURL(new Blob(["\ufeff", filas], { type: "text/csv;charset=utf-8" }))
+  enlace.download = `registro-trading-${etiqueta}.csv`
+  enlace.click()
+  URL.revokeObjectURL(enlace.href)
+}
+
+/** The record card's download button with its three time windows (today, this week, this
+ * month — all local calendar boundaries). A fixed transparent layer closes the tiny menu
+ * on any outside click, the same trade-off every popover makes without a ports layer. */
+function MenuDescarga(props: { entradas: Accessor<EntradaRegistro[]> }) {
+  const language = useLanguage()
+  const [abierto, fijarAbierto] = createSignal(false)
+
+  const bajar = (desde: number, etiqueta: string) => {
+    fijarAbierto(false)
+    descargarRegistro(props.entradas().filter((entrada) => entrada.ts >= desde), etiqueta)
+  }
+  // Evaluated when the user picks: today's midnight, this Monday and this month's 1st.
+  const pedir = () => {
+    const hoy = new Date()
+    hoy.setHours(0, 0, 0, 0)
+    const dia = hoy.toISOString().slice(0, 10)
+    const semana = new Date(hoy)
+    semana.setDate(hoy.getDate() - ((hoy.getDay() + 6) % 7))
+    const mes = new Date(hoy)
+    mes.setDate(1)
+    return [
+      { clave: "today" as const, desde: hoy.getTime(), etiqueta: dia },
+      { clave: "week" as const, desde: semana.getTime(), etiqueta: `${dia}-semana` },
+      { clave: "month" as const, desde: mes.getTime(), etiqueta: `${dia}-mes` },
+    ]
+  }
+
+  return (
+    <div class="relative">
+      <IconButton
+        type="button"
+        variant="ghost-muted"
+        size="small"
+        class="shrink-0"
+        onMouseDown={(event) => event.preventDefault()}
+        onClick={() => fijarAbierto(!abierto())}
+        aria-label={language.t("trading.log.download.title")}
+        aria-expanded={abierto()}
+        icon={<Icon name="download" />}
+      />
+      <Show when={abierto()}>
+        <div class="fixed inset-0 z-40" onClick={() => fijarAbierto(false)} aria-hidden="true" />
+        <menu class="absolute end-0 top-full z-50 mt-1 flex w-max flex-col whitespace-nowrap rounded-[8px] border border-v2-border-border-muted bg-v2-background-bg-layer-01 p-1">
+          <For each={pedir()}>
+            {(opción) => (
+              <button
+                type="button"
+                class="rounded-[6px] px-2 py-1 text-start text-[13px] text-v2-text-text-base hover:bg-v2-background-bg-layer-02"
+                style={LINEA}
+                onClick={() => bajar(opción.desde, opción.etiqueta)}
+              >
+                {language.t(`trading.log.download.${opción.clave}`)}
+              </button>
+            )}
+          </For>
+        </menu>
+      </Show>
+    </div>
+  )
+}
+
+/** One record row class the filter can show alone: the lifecycle beats (open, close,
+ * first signal) and the loud levels (warning, error). "todos" shows the whole record. */
+type FiltroRegistro = "todos" | "apertura" | "cierre" | "senal" | "aviso" | "error"
+
+const CLASE_FILTRO: Array<Exclude<FiltroRegistro, "todos">> = ["apertura", "cierre", "senal", "aviso", "error"]
+
+// The filter value doubles as the match key: the first three are event beats, the last two
+// are log levels, so one comparison pair classifies every row.
+function enFiltro(entrada: EntradaRegistro, filtro: Exclude<FiltroRegistro, "todos">) {
+  return entrada.evento === filtro || entrada.nivel === filtro
+}
+
+/**
+ * The record card's one list, shared with each system's dossier: a fixed system column makes the
+ * beginner of every entry readable at a glance, the lifecycle beats (an event chip, a warning
+ * or an error) always show, and every other line hides behind "Show the rest". The filter chips
+ * list only the classes with rows; a chosen class shows all of its rows (no hiding), and the
+ * order never changes.
+ */
+function ListaRegistro(props: { registros: EntradaRegistro[] }) {
+  const language = useLanguage()
+  const [extendido, fijarExtendido] = createSignal(false)
+  const [filtro, fijarFiltro] = createSignal<FiltroRegistro>("todos")
+
+  const conCoincidencia = () => CLASE_FILTRO.filter((clase) => props.registros.some((entrada) => enFiltro(entrada, clase)))
+  const principales = () => props.registros.filter((entrada) => entrada.evento !== null || entrada.nivel !== "info")
+  const resto = () => props.registros.filter((entrada) => entrada.evento === null && entrada.nivel === "info")
+  const visibles = () => {
+    const elegido = filtro()
+    if (elegido === "todos") return extendido() ? props.registros : principales()
+    return props.registros.filter((entrada) => enFiltro(entrada, elegido))
+  }
+
+  return (
+    <>
+      <Show when={conCoincidencia().length > 0}>
+        <div class="mb-1.5 flex flex-wrap gap-1">
+          <button
+            type="button"
+            class={`h-5 shrink-0 rounded-full border px-2 text-[11px] leading-[18px] text-v2-text-text-base ${
+              filtro() === "todos"
+                ? "border-v2-border-border-muted bg-v2-background-bg-layer-02"
+                : "border-transparent hover:text-v2-text-text-muted text-v2-text-text-faint"
+            }`}
+            onClick={() => fijarFiltro("todos")}
+            aria-pressed={filtro() === "todos"}
+          >
+            {language.t("trading.log.filter.all")}
+          </button>
+          <For each={conCoincidencia()}>
+            {(clase) => (
+              <button
+                type="button"
+                class={`h-5 shrink-0 rounded-full border px-2 text-[11px] leading-[18px] text-v2-text-text-base ${
+                  filtro() === clase
+                    ? "border-v2-border-border-muted bg-v2-background-bg-layer-02"
+                    : "border-transparent hover:text-v2-text-text-muted text-v2-text-text-faint"
+                }`}
+                onClick={() => fijarFiltro(clase)}
+                aria-pressed={filtro() === clase}
+              >
+                {language.t(`trading.log.filter.${clase}`)}
+              </button>
+            )}
+          </For>
+        </div>
+      </Show>
+      <div class="flex flex-col">
+        <Show
+          when={visibles().length > 0}
+          fallback={
+            filtro() === "todos" ? null : (
+              <p class="px-1 text-[13px] text-v2-text-text-faint" style={LINEA}>
+                {language.t("trading.log.filter.empty")}
+              </p>
+            )
+          }
+        >
+          <For each={visibles()}>
+            {(entrada) => (
+              <div class="flex min-h-6 items-center gap-2">
+                <time
+                  class="w-[70px] shrink-0 text-[11px] text-v2-text-text-faint tabular-nums"
+                  style={LINEA}
+                  title={títuloMomento(entrada.ts)}
+                >
+                  {formatoMomento(entrada.ts)}
+                </time>
+                <span class="flex w-[72px] shrink-0 justify-start">
+                  <Show
+                    when={entrada.evento}
+                    keyed
+                    fallback={
+                      <span class={`text-[11px] uppercase tracking-[0.04em] ${tonoNivel(entrada.nivel)}`} style={LINEA}>
+                        {entrada.nivel === "info" ? "" : entrada.nivel}
+                      </span>
+                    }
+                  >
+                    {(evento) => (
+                      <span class={`inline-block rounded-full border px-1.5 text-[10px] font-medium tracking-[0.04em] uppercase leading-[14px] ${CLASE_EVENTO[evento]}`}>
+                        {language.t(CLAVE_EVENTO[evento])}
+                      </span>
+                    )}
+                  </Show>
+                </span>
+                <span class="w-48 shrink-0 truncate font-mono text-[12px] text-v2-text-text-base" title={entrada.bot}>
+                  {entrada.bot}
+                </span>
+                <span class="min-w-0 flex-1 truncate text-[13px] text-v2-text-text-muted" style={LINEA}>
+                  {entrada.mensaje}
+                </span>
+                <Show when={entrada.evento === "cierre"}>
+                  <span class={`w-[64px] shrink-0 text-end ${NÚMERO} ${tonoPnl(entrada.pnl)}`}>{formatoUSD(entrada.pnl)}</span>
+                </Show>
+              </div>
+            )}
+          </For>
+        </Show>
+      </div>
+      <Show when={filtro() === "todos" && resto().length > 0}>
+        <button
+          type="button"
+          class="mt-1 px-1 text-[11px] text-v2-text-text-faint hover:text-v2-text-text-muted"
+          style={LINEA}
+          onClick={() => fijarExtendido(!extendido())}
+        >
+          {language.t(extendido() ? "trading.log.less" : "trading.log.more", { count: resto().length })}
+        </button>
+      </Show>
+    </>
+  )
+}
+
+/**
+ * The account card's equity sparkline: the day P/L series the engine samples every 15 s,
+ * stroked by the newest sample's sign. Fewer than two numeric samples draw nothing — a
+ * curve of one point says nothing the P/L number next to it doesn't already say.
+ */
+function MiniCurva(props: { curva: CurvaInfo[] }) {
+  const language = useLanguage()
+  // flatMap keeps the numbers' type without a cast: null samples just drop out of the path.
+  const puntos = createMemo(() => {
+    const serie = props.curva.flatMap((punto) => (punto.pnl_dia === null ? [] : [punto.pnl_dia]))
+
+    if (serie.length < 2) return null
+
+    const mínimo = Math.min(...serie)
+    const rango = Math.max(...serie) - mínimo || 1
+    // 2px margins inside the 100×24 viewBox for the stroke; the x spacing is even regardless
+    // of uneven sample gaps, which keeps the line readable at 1000 points.
+    return {
+      último: serie[serie.length - 1],
+      path: serie
+        .map((valor, i) => `${((i * 100) / (serie.length - 1)).toFixed(2)},${(22 - ((valor - mínimo) / rango) * 20).toFixed(2)}`)
+        .join(" "),
+    }
+  })
+
+  return (
+    <Show when={puntos()} keyed>
+      {(vista) => (
+        <div class="px-1 pt-2">
+          <p class="mb-1 text-[11px] text-v2-text-text-faint" style={LINEA}>
+            {language.t("trading.account.curve")}
+          </p>
+          <svg viewBox="0 0 100 24" preserveAspectRatio="none" class="h-8 w-full">
+            <polyline
+              fill="none"
+              stroke={vista.último >= 0 ? "var(--v2-state-fg-success)" : "var(--v2-state-fg-danger)"}
+              stroke-width="1"
+              vector-effect="non-scaling-stroke"
+              points={vista.path}
+            />
+          </svg>
+        </div>
+      )}
+    </Show>
+  )
+}
+
