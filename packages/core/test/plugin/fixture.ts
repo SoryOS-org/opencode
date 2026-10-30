@@ -14,6 +14,7 @@ import { Bus } from "@opencode/core/bus"
 import { FileSystem } from "@opencode/core/filesystem"
 import { FSUtil } from "@opencode/util/fs-util"
 import { Global } from "@opencode/util/global"
+import { EffectFlock } from "@opencode/util/effect-flock"
 import { Form } from "@opencode/core/form"
 import { Generate } from "@opencode/core/generate"
 import { Integration } from "@opencode/core/integration"
@@ -95,6 +96,7 @@ export const makePluginTestLayer = (permission = permissionLayer, generate = gen
       Credential.node,
       Config.node,
       Database.node,
+      EffectFlock.node,
       Environment.node,
       FileAccess.node,
       Global.node,

@@ -8,7 +8,7 @@ import { Instructions } from "./instructions/index.js"
 import { State } from "./state.js"
 
 export class File extends Schema.Class<File>("InstructionDiscovery.File")({
-  // An absolute file path, or the URL of a configured remote instruction.
+  // An absolute file path, the URL of a configured remote instruction, or an OpenCode Console instruction's label.
   path: Schema.String,
   content: Schema.String,
 }) {}
@@ -145,5 +145,18 @@ function renderUpdate(previous: ReadonlyArray<File>, current: ReadonlyArray<File
       const replacement = `The instructions changed:\n${render([after])}`
       return diff.length < replacement.length ? diff : replacement
     }),
+    ...(reordered(previous, current)
+      ? [`The instructions now apply in this order:\n${current.map((file) => `- ${file.path}`).join("\n")}`]
+      : []),
   ].join("\n\n")
+}
+
+// Order carries precedence, such as Console instructions arranged by tier, and the admitted state already
+// records the new order, so the session must hear about a reorder even when no text changed.
+function reordered(previous: ReadonlyArray<File>, current: ReadonlyArray<File>) {
+  const kept = new Set(current.map((file) => file.path))
+  const before = previous.map((file) => file.path).filter((path) => kept.has(path))
+  const remaining = new Set(before)
+  const after = current.map((file) => file.path).filter((path) => remaining.has(path))
+  return before.some((path, index) => path !== after[index])
 }

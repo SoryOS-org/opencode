@@ -89,6 +89,8 @@ Add more local directories or HTTP catalogs with the `skills` array in any `open
 
 Every discovered config file contributes its entries. `skills` arrays are combined rather than replaced.
 
+A connected [OpenCode Console](/console) workspace can also share skills. OpenCode downloads each one with your Console sign-in when the workspace publishes a new version, then loads it from its cache. A skill the workspace stops sharing is removed. If a download fails, the last downloaded version stays available.
+
 ## Catalogs
 
 An HTTP catalog is a base URL with an `index.json` file:
@@ -176,6 +178,7 @@ Sources are registered from lower to higher precedence:
 4. `~/.config/opencode/skills`
 5. Project `.opencode/skills`, from the project root toward the current directory
 6. Explicit `skills` config entries, in config priority and array order
+7. Skills shared by a connected OpenCode Console workspace
 
 Avoid duplicate IDs unless you intend to override an earlier skill.
 

@@ -160,7 +160,10 @@ export const OpencodePlugin = define<HttpClient.HttpClient | Bus.Service | Confi
       remote: ConfigIntegration.Remote | undefined
       connection: ActiveConnection
       organization: string | undefined
-    } = { remote: undefined, connection: undefined, organization: undefined }
+      // The Console server the config came from, which serves its Library's skill files.
+      origin: string | undefined
+      orgID: string | undefined
+    } = { remote: undefined, connection: undefined, organization: undefined, origin: undefined, orgID: undefined }
     // Status last reported for the active connection, so inference failures can name the fix.
     let reported: IntegrationConnection.Status | undefined
     let explainers: Effect.Success<ReturnType<typeof ctx.session.hook>>[] = []
@@ -172,7 +175,7 @@ export const OpencodePlugin = define<HttpClient.HttpClient | Bus.Service | Confi
       const connection = yield* ctx.integration.connection.active("opencode")
       if (!connection) {
         reported = undefined
-        return { remote: undefined, connection, organization: undefined }
+        return { remote: undefined, connection, organization: undefined, origin: undefined, orgID: undefined }
       }
       const status = (status: IntegrationConnection.Status | undefined) => {
         reported = status
@@ -181,12 +184,20 @@ export const OpencodePlugin = define<HttpClient.HttpClient | Bus.Service | Confi
       return yield* ctx.integration.connection.resolve(connection).pipe(
         Effect.flatMap((credential) => {
           if (!credential || credential.type === "external")
-            return Effect.succeed({ remote: undefined, connection, organization: undefined })
-          return fetchConfig(http, credential).pipe(
-            Effect.map((remote) => ({
+            return Effect.succeed<typeof snapshot>({
+              remote: undefined,
+              connection,
+              organization: undefined,
+              origin: undefined,
+              orgID: undefined,
+            })
+          return Effect.all([fetchConfig(http, credential), normalizeServer(ConsoleAccess.server(credential))]).pipe(
+            Effect.map(([remote, origin]) => ({
               remote,
               connection,
               organization: organizationName(credential),
+              origin,
+              orgID: typeof credential.metadata?.orgID === "string" ? credential.metadata.orgID : undefined,
             })),
           )
         }),
@@ -200,8 +211,14 @@ export const OpencodePlugin = define<HttpClient.HttpClient | Bus.Service | Confi
             // A load that fails for the connection already in place keeps its last config: dropping it
             // would lift organization policy while personal credentials keep working.
             return IntegrationConnection.key(connection) === IntegrationConnection.key(snapshot.connection)
-              ? { remote: snapshot.remote, connection, organization: snapshot.organization }
-              : { remote: undefined, connection, organization: undefined }
+              ? {
+                  remote: snapshot.remote,
+                  connection,
+                  organization: snapshot.organization,
+                  origin: snapshot.origin,
+                  orgID: snapshot.orgID,
+                }
+              : { remote: undefined, connection, organization: undefined, origin: undefined, orgID: undefined }
           }),
         ),
       )
@@ -229,6 +246,8 @@ export const OpencodePlugin = define<HttpClient.HttpClient | Bus.Service | Confi
                 ? { ...next.connection, id: Credential.ID.make(next.connection.id) }
                 : next.connection,
             organization: next.organization,
+            origin: next.origin,
+            orgID: next.orgID,
             info: next.remote,
           }),
       )
@@ -378,12 +397,7 @@ export const OpencodePlugin = define<HttpClient.HttpClient | Bus.Service | Confi
     const guard = Effect.fn("OpencodePlugin.guard")(function* (next: typeof snapshot) {
       yield* Effect.forEach(explainers, (registration) => registration.dispose, { discard: true })
       explainers = yield* Effect.forEach(
-        next.connection
-          ? new Set([
-              Provider.ID.opencode,
-              ...Object.keys(next.remote?.providers ?? {}),
-            ])
-          : [],
+        next.connection ? new Set([Provider.ID.opencode, ...Object.keys(next.remote?.providers ?? {})]) : [],
         (providerID) => ctx.session.hook("http.response", explain, { providerID }).pipe(Scope.provide(scope)),
       )
     })

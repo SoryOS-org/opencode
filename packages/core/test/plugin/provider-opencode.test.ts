@@ -1800,7 +1800,7 @@ describe("OpencodePlugin with a Console config", () => {
   )
 
   it.effect(
-    "passes only providers, remote MCP servers, policies, and the web search selection, without credentials",
+    "passes only providers, remote MCP servers, policies, the web search selection, and the Library, without credentials",
     () =>
       Effect.acquireUseRelease(
         Effect.sync(() =>
@@ -1836,6 +1836,13 @@ describe("OpencodePlugin with a Console config", () => {
                 permissions: [{ action: "shell", resource: "*", effect: "allow" }],
                 formatter: { console: { command: ["/tmp/console-formatter"] } },
                 instructions: ["/tmp/console-instructions.md"],
+                skills: ["/tmp/console-skills"],
+                // Fields this version does not know are ignored rather than rejecting the library.
+                library: {
+                  instructions: [{ id: "ins_1", name: "Standards", content: "Be kind", future: true }],
+                  skills: [{ slug: "review", version: "skl_1:1", future: true }],
+                  future: [],
+                },
               }),
           }),
         ),
@@ -1845,17 +1852,28 @@ describe("OpencodePlugin with a Console config", () => {
             const config = yield* Config.Service
             yield* credentials.create({
               integrationID: Integration.ID.make("opencode"),
-              value: Credential.Key.make({ type: "key", key: "secret", metadata: { server: server.url.origin } }),
+              value: Credential.Key.make({
+                type: "key",
+                key: "secret",
+                metadata: { server: server.url.origin, orgID: "org_acme" },
+              }),
             })
             yield* addPlugin().pipe(inProcess(server))
 
-            const info = required(yield* consoleDocument(config)).info
+            const document = required(yield* consoleDocument(config))
+            const info = document.info
             expect(Object.keys(Schema.encodeSync(Info)(info)).toSorted()).toEqual([
               "mcp",
               "policies",
               "providers",
               "websearch",
             ])
+            expect(document.library).toEqual({
+              instructions: [{ id: "ins_1", name: "Standards", content: "Be kind" }],
+              skills: [{ slug: "review", version: "skl_1:1" }],
+            })
+            expect(document.origin).toBe(server.url.origin)
+            expect(document.orgID).toBe("org_acme")
             expect(Object.keys(info.mcp?.servers ?? {})).toEqual(["remote"])
             const remote = required(info.providers?.remote)
             expect(remote.env).toBeUndefined()
@@ -1865,6 +1883,33 @@ describe("OpencodePlugin with a Console config", () => {
           }),
         (server) => Effect.promise(() => server.stop(true)),
       ),
+  )
+
+  it.effect("drops a malformed Library and keeps the Console's policies", () =>
+    Effect.acquireUseRelease(
+      Effect.sync(() =>
+        Bun.serve({
+          port: 0,
+          fetch: () =>
+            Response.json({ $schema, policies: [deny], library: { instructions: [{ id: "ins_1" }], skills: "all" } }),
+        }),
+      ),
+      (server) =>
+        Effect.gen(function* () {
+          const credentials = yield* Credential.Service
+          const config = yield* Config.Service
+          yield* credentials.create({
+            integrationID: Integration.ID.make("opencode"),
+            value: Credential.Key.make({ type: "key", key: "secret", metadata: { server: server.url.origin } }),
+          })
+          yield* addPlugin().pipe(inProcess(server))
+
+          const document = required(yield* consoleDocument(config))
+          expect(document.info.policies).toEqual([deny])
+          expect(document.library).toBeUndefined()
+        }),
+      (server) => Effect.promise(() => server.stop(true)),
+    ),
   )
 
   it.effect("keeps a newer Console config loadable despite values this version does not know", () =>
